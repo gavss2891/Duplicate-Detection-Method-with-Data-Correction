@@ -1,38 +1,86 @@
-# TV Product Duplicate Detection
+# CleanMSMP+ — Multi-Component Duplicate Detection with Data Correction
 
-Duplicate detection system for TV products using Locality Sensitive Hashing (LSH) with MinHash signatures and the Multi-component Similarity Method (MSM). Includes an extended variant (**CleanMSMP+**) that applies data correction as a preprocessing step, compared against the baseline **MSMP+** approach.
+A scalable entity deduplication pipeline combining **Locality Sensitive Hashing (LSH)** with the **Multi-component Similarity Method (MSM)**. This repository introduces **CleanMSMP+**, an extended variant that applies structured data correction as a preprocessing step, and benchmarks it against the baseline **MSMP+**.
 
-## Overview
+---
 
-Given a dataset of TV product listings scraped from multiple e-commerce shops, the goal is to identify which listings refer to the same physical product (duplicates) without performing all O(n²) pairwise comparisons.
+## The Problem: Duplicate Entities Across Heterogeneous Sources
 
-The pipeline:
+Modern organizations ingest data from multiple sources — ERP systems, supplier portals, e-commerce feeds, procurement platforms, third-party data providers — and the same real-world entity often appears dozens of times under slightly different representations.
 
-1. **Data Cleaning** — Normalize units and remove noise; optionally apply extended data correction (CleanMSMP+)
-2. **LSH** — Quickly narrow down the search space to a small set of candidate pairs likely to be duplicates
-3. **MSM Scoring** — Compute a rich similarity score for each candidate pair using features and titles
-4. **Clustering** — Group similar products into duplicate clusters
-5. **Evaluation** — Measure performance across multiple bootstrap samples
+A TV listed as `"Samsung 55" QLED 4K"` on one retailer's website may appear as `"SAMSUNG QN55Q80C 55-Inch 4K Ultra HD"` on another. A vendor named `"Siemens AG"` in one procurement system may be recorded as `"SIEMENS Aktiengesellschaft"` or `"Siemens (Deutschland)"` in another. A spare part catalogued as `"Valve, Gate, DN50, PN16, CS"` in one system may be described as `"Gate Valve 2in 16bar Carbon Steel"` elsewhere.
+
+These inconsistencies arise from free-text entry, varying standards, abbreviations, unit formatting differences, and the absence of a single master identifier. The result is **dirty master data**: inflated vendor lists, redundant material records, incorrect spend analytics, broken procurement workflows, and unreliable reporting.
+
+Exact-match deduplication fails immediately in this setting. Purely string-based approaches such as edit distance do not generalize across the structured, multi-attribute nature of these records. A practical solution must reason about **multiple text components simultaneously** — weighing both feature-level key-value attributes and free-text descriptions — while remaining computationally tractable at scale.
+
+---
+
+## Where This Approach Applies
+
+This pipeline is designed for any dataset where entities are described through **multiple text components** — a mix of structured attribute-value pairs and unstructured text fields. It has shown particular effectiveness in enterprise **Master Data Management (MDM)** scenarios:
+
+### Procurement & Spend Analytics
+Vendor and supplier master data in ERP systems (SAP, Oracle, Coupa) frequently contain hundreds or thousands of near-duplicate vendor records created by different business units, regions, or during system migrations. Deduplicating vendor masters directly improves spend consolidation, contract compliance, and supplier risk visibility.
+
+### Materials & Parts Master
+Manufacturing and MRO (Maintenance, Repair & Operations) catalogues accumulate duplicate material records with inconsistent descriptions, unit-of-measure variants, and partial specifications. Identifying that `"Bearing, Ball, 6205-2RS, 25x52x15mm"` and `"Ball Bearing 6205 RS 25mm bore"` refer to the same component is essential for accurate inventory management, purchasing efficiency, and obsolescence analysis.
+
+### Customer Master Data
+Customer records aggregated from CRM, billing, support, and marketing platforms routinely contain duplicate profiles for the same individual or organization — varying name formats, address abbreviations, and missing fields make exact matching unreliable.
+
+### Product Information Management (PIM)
+Retailers and distributors managing large product catalogs across multiple supplier feeds face the same challenge: the same SKU arrives with different titles, feature sets, and attribute formats. Deduplication is a prerequisite for catalog consolidation and accurate product matching.
+
+### Healthcare Provider Directories
+Provider records sourced from insurance networks, hospital systems, and licensing bodies frequently overlap, with name variations, credential abbreviations, and address inconsistencies preventing reliable matching.
+
+### Financial Counterparty & Instrument Data
+Reference data for legal entities (LEI, SWIFT BIC), financial instruments, and counterparties aggregated from multiple market data vendors contains substantial overlap under different naming conventions and identifier schemes.
+
+---
+
+## This Repository: A TV Product Dataset as a Worked Example
+
+To demonstrate and benchmark the algorithm, we apply it to a publicly available dataset of **TV product listings** scraped from multiple e-commerce retailers. TVs are a natural fit: each listing carries a rich set of attribute-value pairs (screen size, resolution, refresh rate, HDR standard, connector types, etc.) alongside a free-text product title — precisely the multi-component structure found in enterprise master data.
+
+The TV dataset is used here strictly as a benchmark vehicle. **The algorithm is not TV-specific.** Given any dataset of records with mixed structured attributes and text descriptions, the pipeline can be adapted by adjusting tokenization patterns for model words and feature key normalization to the domain at hand.
+
+---
+
+## How It Works
+
+The pipeline eliminates the need for exhaustive O(n²) pairwise comparison through a two-stage design:
+
+1. **Data Cleaning** — Normalize unit variants and remove noise. With CleanMSMP+, additionally apply structured data correction: round fractional values, fix malformed attribute entries, and strip retailer-specific filler tokens.
+2. **LSH (Candidate Generation)** — Extract structured tokens (model words) from titles and feature maps. Compute MinHash signatures and apply LSH banding to hash records into buckets. Only records sharing a bucket become candidate pairs, reducing the comparison space from O(n²) to a tractable subset.
+3. **MSM Scoring** — For each candidate pair, compute a composite similarity score combining: structured feature key-value similarity, model-word overlap from unmatched features, and title similarity via TMWMSim. Records from the same source or with conflicting brand tokens are immediately ruled out.
+4. **Clustering** — Feed the resulting dissimilarity matrix into agglomerative clustering to group records into duplicate sets.
+5. **Evaluation** — Measure performance across multiple bootstrap samples using Pair Completeness, Pair Quality, F1\*, Precision, Recall, and F1.
+
+---
 
 ## Code Structure
 
-### `lsh.py` — Candidate Pair Generation
-Extracts structured tokens (model words) from product titles and feature maps, then uses MinHash signatures and LSH banding to efficiently find pairs of products that are likely duplicates. Instead of comparing every product against every other, LSH hashes products into buckets — only products that share a bucket become candidate pairs. This reduces the number of comparisons from O(n²) to a manageable subset.
+### [lsh.py](lsh.py) — Candidate Pair Generation
+Extracts structured tokens (model words) from product titles and feature maps, then uses MinHash signatures and LSH banding to efficiently find pairs of records likely to be duplicates. Products sharing a bucket become candidate pairs; all others are skipped, collapsing the comparison space dramatically.
 
-### `MSM.py` — Similarity Scoring and Clustering
-For each candidate pair produced by LSH, computes a similarity score combining three signals: how similar the structured feature key-value pairs are, how much overlap there is in model words from unmatched features, and the title similarity from TMWMSim. Products from the same shop or with conflicting brands are immediately ruled out. The resulting dissimilarity matrix is fed into agglomerative clustering to group products into duplicate sets.
+### [MSM.py](MSM.py) — Similarity Scoring and Clustering
+Computes a composite similarity score for each candidate pair across three signals: structured feature key-value similarity, model-word overlap from unmatched features, and title similarity from TMWMSim. Records from the same source or with conflicting brand signals are immediately excluded. The dissimilarity matrix is fed into agglomerative clustering.
 
-### `TMWMSim.py` — Title Similarity
-Computes how similar two product titles are by looking at their model words — the alphanumeric tokens that typically encode screen size, resolution, model numbers, etc. It checks for conflicts (same model word family but different numbers implies different products) and combines cosine similarity with Levenshtein-based model word matching.
+### [TMWMSim.py](TMWMSim.py) — Title Similarity
+Measures similarity between two record titles via their model words — the alphanumeric tokens that encode model numbers, dimensions, ratings, and identifiers. Handles conflict detection (same model word family but different values implies distinct entities) and combines cosine similarity with Levenshtein-based model word matching.
 
-### `data_cleaning.py` — Preprocessing
-Normalizes raw product data before any similarity computation. Always normalizes unit variants (e.g. `inches`, `"`, `-inch` → `inch`). With data correction enabled, additionally rounds fractional inch values, fixes malformed values, and strips noise tokens like retailer names and filler words. Also handles train/test splitting for bootstrap evaluation.
+### [data_cleaning.py](data_cleaning.py) — Preprocessing and Data Correction
+Normalizes raw records before similarity computation. Always normalizes unit variants (e.g. `inches`, `"`, `-inch` → `inch`). With data correction enabled (CleanMSMP+), additionally rounds fractional values, fixes malformed entries, and strips noise tokens such as retailer names and filler words. Also handles train/test splitting for bootstrap evaluation.
 
-### `main.py` — Orchestration
-Ties everything together: runs bootstrap evaluation, tunes parameters (γ, ε, μ, b) on a train split, evaluates on a test split, saves checkpoints so interrupted runs can be resumed, and plots the results comparing CleanMSMP+ vs MSMP+.
+### [main.py](main.py) — Orchestration
+Ties the full pipeline together: runs bootstrap evaluation, tunes parameters (γ, ε, μ, b) on the train split, evaluates on the test split, saves checkpoints so interrupted runs can be resumed, and produces comparison plots of CleanMSMP+ vs MSMP+.
 
-### `analyze_data.py` — Dataset Inspection
-Standalone utility script (not part of the detection pipeline) to inspect the raw dataset — lists shops, feature name frequencies, and any model IDs with duplicate listings in the same store.
+### [analyze_data.py](analyze_data.py) — Dataset Inspection
+Standalone utility for inspecting the raw dataset: lists sources, feature name frequencies, and records with duplicate identifiers within the same source. Not part of the detection pipeline.
+
+---
 
 ## Installation
 
@@ -42,6 +90,8 @@ pip install numpy pandas scikit-learn sympy mmh3 ordered-set primePy python-Leve
 
 The dataset file `TVs-all-merged.json` must be present in the working directory.
 
+---
+
 ## Usage
 
 ### Basic Run
@@ -50,7 +100,7 @@ The dataset file `TVs-all-merged.json` must be present in the working directory.
 python main.py
 ```
 
-Runs both CleanMSMP+ and MSMP+ with 8 bootstrap samples and saves comparison plots.
+Runs both CleanMSMP+ and MSMP+ across 8 bootstrap samples and saves comparison plots.
 
 ### Custom Parameters
 
@@ -73,24 +123,28 @@ main_func(
 
 | Parameter | Description |
 |-----------|-------------|
-| `gamma` (γ) | Threshold for matching feature keys by similarity |
+| `gamma` (γ) | Similarity threshold for matching feature keys across records |
 | `epsilon` (ε) | Clustering distance threshold |
-| `mu` (μ) | Weight of title similarity in the final MSM score |
-| `fraction` | Controls the size of the MinHash signature |
-| `compare` | If `True`, runs both with and without data correction for comparison |
+| `mu` (μ) | Weight of title similarity in the composite MSM score |
+| `fraction` | Controls the size of the MinHash signature matrix |
+| `compare` | If `True`, runs both with and without data correction for benchmarking |
+
+---
 
 ## Evaluation Metrics
 
 | Metric | Description |
 |--------|-------------|
-| **F1** | Overall duplicate detection quality (Precision/Recall harmonic mean) |
-| **F1\*** | Quality of LSH candidate pairs (PQ/PC harmonic mean) |
-| **PC** (Pair Completeness) | How many true duplicate pairs LSH captured as candidates |
-| **PQ** (Pair Quality) | How precise the LSH candidate pairs are |
-| **Fraction Comparisons** | What fraction of all possible pairs LSH actually compared |
+| **F1** | Overall deduplication quality — harmonic mean of Precision and Recall |
+| **F1\*** | Quality of LSH candidate generation — harmonic mean of PQ and PC |
+| **PC** (Pair Completeness) | Share of true duplicate pairs captured as LSH candidates |
+| **PQ** (Pair Quality) | Precision of LSH candidate pairs |
+| **Fraction Comparisons** | Share of all possible pairs that LSH actually evaluated |
+
+---
 
 ## Output
 
-- **Plots** saved to `path_res/` comparing CleanMSMP+ vs MSMP+ across F1, F1\*, PC, PQ, Precision, Recall vs. Fraction Comparisons.
-- **Checkpoints** saved per bootstrap so interrupted runs can be resumed automatically.
-- **Console output** with best and average metrics for each bootstrap and overall.
+- **Plots** saved to `path_res/` comparing CleanMSMP+ vs MSMP+ across F1, F1\*, PC, PQ, Precision, and Recall as a function of Fraction of Comparisons.
+- **Checkpoints** saved per bootstrap so interrupted runs resume automatically without recomputation.
+- **Console output** with best and average metrics per bootstrap and across all runs.
