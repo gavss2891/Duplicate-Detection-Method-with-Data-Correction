@@ -11,7 +11,7 @@ from sympy import divisors
 from multiprocessing import Pool, cpu_count
 import data_cleaning
 import lsh
-import msm
+import MSM as msm
 
 def find_predictions(clusters):
     predictions = set()
